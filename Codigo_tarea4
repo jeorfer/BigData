@@ -1,1 +1,159 @@
+import happybase
+import pandas as pd
+from datetime import datetime
 
+# Bloque principal de ejecución
+try:
+    # 1. Establecer conexión con HBase
+    connection = happybase.Connection('localhost')
+    print("Conexión establecida con HBase")
+
+    # 2. Crear la tabla con las familias de columnas
+    table_name = 'property_records'
+    families = {
+        'basic': dict(),        # información básica de la propiedad
+        'location': dict(),     # información de ubicación
+        'transaction': dict(),  # información de transacciones
+        'value': dict(),        # información de valores
+        'legal': dict()         # información legal/documentos
+    }
+
+    # Eliminar la tabla si ya existe
+    if table_name.encode() in connection.tables():
+        print(f"Eliminando tabla existente - {table_name}")
+        connection.delete_table(table_name, disable=True)
+
+    # Crear nueva tabla
+    connection.create_table(table_name, families)
+    table = connection.table(table_name)
+    print("Tabla 'property_records' creada exitosamente")
+
+    # 3. Cargar datos del CSV
+    property_data = pd.read_csv('7y2j-43cv (2).csv')
+    
+    # Iterar sobre el DataFrame usando el índice
+    for index, row in property_data.iterrows():
+        # Generar row key basado en la matrícula
+        row_key = f"prop_{row['matricula'].replace('-', '_')}".encode()
+        
+        # Organizar los datos en familias de columnas
+        data = {
+            b'basic:matricula': str(row['matricula']).encode(),
+            b'basic:pk': str(row['pk']).encode(),
+            b'basic:fecha_radica': str(row['fecha_radica_texto']).encode(),
+            b'basic:fecha_apertura': str(row['fecha_apertura_texto']).encode(),
+            b'basic:year_radica': str(row['year_radica']).encode(),
+            
+            b'location:departamento': str(row['departamento']).encode(),
+            b'location:municipio': str(row['municipio']).encode(),
+            b'location:tipo_predio': str(row['tipo_predio_zona']).encode(),
+            b'location:categoria_ruralidad': str(row['categoria_ruralidad_2024']).encode(),
+            
+            b'transaction:tipo_transaccion': str(row['nombre_natujur']).encode(),
+            b'transaction:cod_transaccion': str(row['cod_natujur']).encode(),
+            b'transaction:documento': str(row['documento_justificativo']).encode(),
+            
+            b'value:tiene_valor': str(row['tiene_valor']).encode(),
+            b'value:valor': str(row['valor']).encode() if pd.notna(row['valor']) else b'',
+            
+            b'legal:num_anotacion': str(row['num_anotacion']).encode(),
+            b'legal:estado_folio': str(row['estado_folio']).encode() if pd.notna(row['estado_folio']) else b'',
+            b'legal:folios_derivados': str(row['folios_derivados']).encode() if pd.notna(row['folios_derivados']) else b''
+        }
+        
+        table.put(row_key, data)
+    
+    print("Datos cargados exitosamente")
+
+    # 4. Consultas y Análisis de Datos
+    print("\n=== Todas las propiedades en la base de datos (primeras 3) ===")
+    count = 0
+    for key, data in table.scan():
+        if count < 3:  # Limitamos a 3 para el ejemplo
+            print(f"\nPropiedad ID: {key.decode()}")
+            print(f"Matrícula: {data[b'basic:matricula'].decode()}")
+            print(f"Municipio: {data[b'location:municipio'].decode()}")
+            print(f"Tipo de transacción: {data[b'transaction:tipo_transaccion'].decode()}")
+            count += 1
+
+    # 5. Propiedades con valor registrado
+    print("\n=== Propiedades con valor registrado ===")
+    for key, data in table.scan():
+        if data[b'value:tiene_valor'].decode() == '1' and data[b'value:valor'] != b'':
+            print(f"\nPropiedad ID: {key.decode()}")
+            print(f"Matrícula: {data[b'basic:matricula'].decode()}")
+            print(f"Valor: {data[b'value:valor'].decode()}")
+            print(f"Tipo de transacción: {data[b'transaction:tipo_transaccion'].decode()}")
+
+    # 6. Análisis por tipo de predio
+    print("\n=== Conteo de propiedades por tipo de predio ===")
+    predio_stats = {}
+    for key, data in table.scan():
+        predio = data[b'location:tipo_predio'].decode()
+        predio_stats[predio] = predio_stats.get(predio, 0) + 1
+    
+    for predio, count in predio_stats.items():
+        print(f"{predio}: {count} propiedades")
+
+    # 7. Análisis de transacciones más comunes
+    print("\n=== Transacciones más comunes ===")
+    transaccion_stats = {}
+    for key, data in table.scan():
+        trans = data[b'transaction:tipo_transaccion'].decode()
+        transaccion_stats[trans] = transaccion_stats.get(trans, 0) + 1
+    
+    for trans, count in sorted(transaccion_stats.items(), key=lambda x: x[1], reverse=True)[:5]:
+        print(f"{trans}: {count} ocurrencias")
+
+    # 8. Valor promedio por tipo de predio
+    print("\n=== Valor promedio por tipo de predio ===")
+    predio_values = {}
+    predio_counts = {}
+    
+    for key, data in table.scan():
+        if data[b'value:tiene_valor'].decode() == '1' and data[b'value:valor'] != b'':
+            predio = data[b'location:tipo_predio'].decode()
+            try:
+                valor = float(data[b'value:valor'].decode())
+                predio_values[predio] = predio_values.get(predio, 0) + valor
+                predio_counts[predio] = predio_counts.get(predio, 0) + 1
+            except ValueError:
+                continue
+    
+    for predio in predio_values:
+        avg_value = predio_values[predio] / predio_counts[predio]
+        print(f"{predio}: {avg_value:,.2f}")
+
+    # 9. Top 5 propiedades con mayor valor
+    print("\n=== Top 5 propiedades con mayor valor ===")
+    top_properties = []
+    for key, data in table.scan():
+        if data[b'value:tiene_valor'].decode() == '1' and data[b'value:valor'] != b'':
+            try:
+                valor = float(data[b'value:valor'].decode())
+                top_properties.append({
+                    'id': key.decode(),
+                    'matricula': data[b'basic:matricula'].decode(),
+                    'valor': valor,
+                    'transaccion': data[b'transaction:tipo_transaccion'].decode()
+                })
+            except ValueError:
+                continue
+    
+    for prop in sorted(top_properties, key=lambda x: x['valor'], reverse=True)[:5]:
+        print(f"\nID: {prop['id']}")
+        print(f"Matrícula: {prop['matricula']}")
+        print(f"Valor: {prop['valor']:,.2f}")
+        print(f"Transacción: {prop['transaccion']}")
+
+    # 10. Ejemplo de actualización de valor
+    prop_to_update = 'prop_001_121'  # Ejemplo de matrícula
+    new_value = 600000000
+    table.put(prop_to_update.encode(), {b'value:valor': str(new_value).encode(), b'value:tiene_valor': b'1'})
+    print(f"\nValor actualizado para la propiedad ID: {prop_to_update}")
+
+except Exception as e:
+    print(f"Error: {str(e)}")
+finally:
+    # Cerrar la conexión
+    connection.close()
